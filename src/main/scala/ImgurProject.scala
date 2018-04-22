@@ -25,42 +25,34 @@ case class Post(link: String, images: List[JValue])
 
 
 object Fetcher {
-  var etag = ""
+  var lastImage: BigInt = 0
 
   def getPosts: Future[Unit] = {
-    var request = Http("https://api.imgur.com/3/gallery/hot/").header("Authorization", "Client-ID b5321b8f5cb0519").option(HttpOptions.connTimeout(5000))
-
-    if (!etag.isEmpty)
-      request = request.header("If-None-Match", etag)
-
+    var request = Http("https://api.imgur.com/3/gallery/hot/time/").header("Authorization", "Client-ID b5321b8f5cb0519").option(HttpOptions.connTimeout(5000))
     val response = request.asString
-    val etagToken = response.headers get "ETag" get 0
-
-    if (!etagToken.isEmpty)
-      etag = etagToken
-
-
     if (response.code == 200) {
-      val ast = parse(response.body)
-
-      val data: List[Post] = for {
-        JObject(item) <- ast
-        JField("link", JString(link)) <- item
-        JArray(images) <- ast \\ "images"
-      } yield Post(link, images)
-
+      val bodyData = parse(response.body)
+      val images: List[JValue] = for {
+        JObject(item) <- bodyData
+        JField("images", JArray(images)) <- item
+        img <- images
+      } yield img
       Future {
+        var currentLastImage: BigInt = lastImage
         for {
-          post <- data
-          JObject(image) <- post.images
-          JField("link", JString(link)) <- image
-        } ParsedData.queue.add(link)
-        Unit
+          img <- images
+          JObject(imgObject) <- img
+          JField("link", JString(link)) <- imgObject
+          JField("datetime", JInt(date)) <- imgObject
+          if date > lastImage
+        } {
+          ParsedData.queue.add(link)
+          currentLastImage = currentLastImage.max(date)
+        }
+        lastImage = currentLastImage
       }
     } else {
-      Future {
-        Unit
-      }
+      Future()
     }
   }
 }
@@ -127,7 +119,6 @@ class FetchActor extends Actor with ActorLogging {
     }
     case r =>
       log.warning(s"Unexpected message: $r")
-
   }
 }
 
