@@ -1,4 +1,5 @@
-import java.util.concurrent.ConcurrentLinkedQueue
+import java.net.SocketTimeoutException
+import java.util.concurrent.{ConcurrentLinkedQueue, TimeoutException}
 import java.util.concurrent.atomic.AtomicInteger
 
 import akka.actor._
@@ -38,10 +39,6 @@ object Fetcher {
     if (!etagToken.isEmpty)
       etag = etagToken
 
-    println(s"Common etag: $etag")
-    println(s"Current etagToken: $etag")
-
-    println(response.code)
 
     if (response.code == 200) {
       val ast = parse(response.body)
@@ -75,13 +72,13 @@ object ParsedData {
 object BotWrapper {
   val postToChannelUrl = "https://api.telegram.org/bot582060096:AAFQy54HegV3MARTDyvU-gVko1z2QE_BQ48/sendMessage"
   val channelId = "@nobodyneedthatshit"
-  val request = Http(postToChannelUrl).option(HttpOptions.followRedirects(true)).option(HttpOptions.connTimeout(5000)).proxy("38.96.9.236", 8008)
+  val request = Http(postToChannelUrl).option(HttpOptions.followRedirects(true)).option(HttpOptions.connTimeout(5000)).option(HttpOptions.readTimeout(10000)).proxy("38.96.9.236", 8008)
 
 }
 
 class FetchActor extends Actor with ActorLogging {
-  val fetchPeriod: FiniteDuration = 2.hours
-  var postPeriod: FiniteDuration = 15.seconds
+  val fetchPeriod: FiniteDuration = 60.seconds
+  var postPeriod: FiniteDuration = 60.seconds
   val counter = new AtomicInteger()
 
   def scheduleTimer(): Cancellable = {
@@ -93,8 +90,13 @@ class FetchActor extends Actor with ActorLogging {
   def sendToChannel(link: String): Unit = {
 
     val data = Seq("chat_id" -> BotWrapper.channelId, "text" -> link)
-    val response = BotWrapper.request.postForm(data).asString
-    println(response.body)
+    try {
+      val response = BotWrapper.request.postForm(data).asString
+    } catch  {
+      case f: SocketTimeoutException => log.error("ReadTimeout exception. Check proxy settings")
+      case f: TimeoutException => log.error("Timeout exception. Check proxy settings")
+      case e => throw e
+    }
   }
 
   override def preStart(): Unit = {
