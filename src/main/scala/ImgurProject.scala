@@ -3,8 +3,6 @@ import java.util.concurrent.{ConcurrentLinkedQueue, TimeoutException}
 import java.util.concurrent.atomic.AtomicInteger
 
 import akka.actor._
-import akka.pattern.{ask, pipe}
-import akka.util.Timeout
 import com.typesafe.config.ConfigFactory
 import org.json4s.JsonAST._
 import org.json4s.jackson.JsonMethods.parse
@@ -27,38 +25,44 @@ case class Post(link: String, images: List[JValue])
 object Fetcher {
   var lastImage: BigInt = 0
 
-  def getPosts: Future[Unit] = {
-    var request = Http("https://api.imgur.com/3/gallery/hot/time/").header("Authorization", "Client-ID b5321b8f5cb0519").option(HttpOptions.connTimeout(5000))
-    val response = request.asString
-    if (response.code == 200) {
-      val bodyData = parse(response.body)
-      val images: List[JValue] = for {
-        JObject(item) <- bodyData
-        JField("images", JArray(images)) <- item
-        img <- images
-      } yield img
-      Future {
-        var currentLastImage: BigInt = lastImage
-        for {
-          img <- images
-          JObject(imgObject) <- img
-          JField("link", JString(link)) <- imgObject
-          JField("datetime", JInt(date)) <- imgObject
-          if date > lastImage
-        } {
-          ParsedData.queue.add(link)
-          currentLastImage = currentLastImage.max(date)
-        }
-        lastImage = currentLastImage
-      }
-    } else {
-      Future()
+  def sendToChannel(link: String): Unit = {
+
+    val data = Seq("chat_id" -> BotWrapper.channelId, "text" -> link)
+    try {
+      val response = BotWrapper.request.postForm(data).asString
+    } catch  {
+      case f: SocketTimeoutException => println("ReadTimeout exception. Check proxy settings")
+      case f: TimeoutException => println("Timeout exception. Check proxy settings")
+      case e => throw e
     }
   }
-}
 
-object ParsedData {
-  val queue = new ConcurrentLinkedQueue[String]()
+  def getPosts: Unit = {
+    var request = Http("https://api.imgur.com/3/gallery/hot/top/").header("Authorization", "Client-ID b5321b8f5cb0519").option(HttpOptions.connTimeout(10000))
+    val response = request.asString
+    if (response.code != 200) {
+      println("Error: status code != 200!!!")
+      return
+    }
+    val bodyData = parse(response.body)
+    val images: List[JValue] = for {
+      JObject(item) <- bodyData
+      JField("images", JArray(images)) <- item
+      img <- images
+    } yield img
+    var currentLastImage: BigInt = lastImage
+    for {
+      img <- images
+      JObject(imgObject) <- img
+      JField("link", JString(link)) <- imgObject
+      JField("datetime", JInt(date)) <- imgObject
+      if date > lastImage
+    } {
+      currentLastImage = date.max(currentLastImage)
+      sendToChannel(link)
+    }
+    lastImage = currentLastImage
+  }
 }
 
 object BotWrapper {
@@ -79,18 +83,6 @@ class FetchActor extends Actor with ActorLogging {
     )
   }
 
-  def sendToChannel(link: String): Unit = {
-
-    val data = Seq("chat_id" -> BotWrapper.channelId, "text" -> link)
-    try {
-      val response = BotWrapper.request.postForm(data).asString
-    } catch  {
-      case f: SocketTimeoutException => log.error("ReadTimeout exception. Check proxy settings")
-      case f: TimeoutException => log.error("Timeout exception. Check proxy settings")
-      case e => throw e
-    }
-  }
-
   override def preStart(): Unit = {
     scheduleTimer()
   }
@@ -100,22 +92,8 @@ class FetchActor extends Actor with ActorLogging {
   override def receive: PartialFunction[Any, Unit] = {
     case FetchData => {
       log.warning("FetchData message")
-      val Freq = Fetcher.getPosts
-
-      Freq onComplete(_ =>
-        {
-          context.system.scheduler.scheduleOnce(postPeriod, context.self, PostData)
-          context.system.scheduler.scheduleOnce(fetchPeriod, context.self, FetchData)
-        }
-        )
-    }
-
-    case PostData => {
-      log.warning("PostData message")
-
-      val link = ParsedData.queue.poll()
-      sendToChannel(link)
-      context.system.scheduler.scheduleOnce(postPeriod, context.self, PostData)
+      Fetcher.getPosts
+      context.system.scheduler.scheduleOnce(fetchPeriod, context.self, FetchData)
     }
     case r =>
       log.warning(s"Unexpected message: $r")
